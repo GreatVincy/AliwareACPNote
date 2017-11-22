@@ -182,6 +182,7 @@ DRDS可以解释SQL, 按照拆分策略找到数据表所在的RDS物理库和�
 4. 事务支持
 显式**事务**、写请求 -> 主实例
 查询请求 -> 读写分离
+事务中的只读查询会被发送到 RDS 主实例
 `SELECT、SHOW、EXPLAIN、DESCRIBE`均属于读请求   
 `INSERT、REPLACE、UPDATE、DELETE、CALL`均属于写请求
 
@@ -205,6 +206,7 @@ DRDS可以解释SQL, 按照拆分策略找到数据表所在的RDS物理库和�
  + 源RDS实例扩容过程中会有读压力, 请尽量在源RDS低负载时操作
  + 扩容期间请勿在控制台提交DDL任务或通过直接连接DRDS执行DDL语句, 否则会导致扩容任务失败
  + 扩容需要保证源库中所有表具有主键, 如果没有需要事先添加好
+ + 控制台默认会平均分配分库到新添加的 RDS 实例上。也可以手动向新增的 RDS 实例上添加或删除分库。
 
 3. 切换
  + 历史数据和增量数据`迁移`完成后, `迁移`任务进度会达到100%, 此时可以进行`切换`或者`回滚`, 放弃本次扩容
@@ -219,6 +221,9 @@ DRDS可以解释SQL, 按照拆分策略找到数据表所在的RDS物理库和�
 清理任务完成后，整个平滑扩容过程结束。新增 RDS 实例会成为 DRDS 对应逻辑库新的存储节点。
 
 **注意: 平滑扩容资源消耗高, 执行扩容前请提工单寻求DRDS团队协助**
+**平滑扩容不增加分库数目,只增加RDS实例,把原来的RDS实例上的部分分库迁移到新的RDS实例上**
+**在切换前都可以通过回滚来放弃本次扩容**
+**目前平滑扩容是通过移库的方式来实现扩容。如果扩容到一定程度，出现一个分库超出了单个 RDS 容量，无法进一步平滑扩容时，可以提交工单，申请增加分库数目并扩容。这时会对数据重新进行 HASH 计算，重新分配**
 
 ## DRDS实例管理
 ### 实例类型
@@ -387,3 +392,114 @@ DRDS可以解释SQL, 按照拆分策略找到数据表所在的RDS物理库和�
 2. 使用`SHOW TOPOLOGY FROM table_name `查看表的拓扑结构
 3. `CHECK TABLE tablename`指令来查看逻辑表是否创建成功
 4. 使用幂等的方式继续执行建表操作或删表操作，会创建或删除剩余的物理表。
+
+## DRDS监控
++ 数据采集周期: 均为五分钟,资源监控数据保留3天,引擎监控数据保留7天
++ 监控项分类: 资源监控(CPU/网络),引擎监控
++ 逻辑QPS(QueryPerSecond)
+  + DRDS 服务节点每秒处理的 SQL 语句数目的总和
+
++ 物理QPS
+  + DRDS 服务节点每秒发送到 RDS 的 SQL 操作数总和
+
++ 逻辑RT(ResponseTime)
+  + DRDS 对于每条 SQL 的平均响应时间：DRDS 从收到逻辑 SQL 到返回数据给应用的响应时间
+
++ 物理RT
+  + DRDS 发送到 RDS 的 SQL 的平均响应时间：DRDS 从发出物理 SQL 到 RDS 至收到 RDS 返回数据的时间
+
++ 优化示例
+  + 逻辑RT=DRDS解释SQL耗时 + max(物理RT) + 解释SQL耗时耗时
+  + 正常来说逻辑RT>=物理RT,且相差不会太大
+  + 若逻辑RT远高于物理RT,证明瓶颈在DRDS,解释SQL耗时/解释SQL耗时较大,可对DRDS进行升配解决
+  + 若逻辑RT接近物理RT,且都很高,证明瓶颈在底层RDS,可升级RDS或在RDS层面进行优化
+  + 理想情况下逻辑QPS:区里QPS=1:1,若两者相差较大,因检查业务SQL是否带了拆分条件
+  + 使用explain查看sql被分发到哪些分库上执行
+
+## DRDS自定义指令
++ SHOW HELP:展示 DRDS 所有辅助 SQL 指令及其说明
++ SHOW RULE [FROM tablename]: 查看数据库下每一个/指定逻辑表的拆分情况
++ SHOW FULL RULE [FROM tablename]:查看数据库下逻辑表的拆分规则，比 SHOW RULE 指令展示的信息更加详细
++ SHOW TOPOLOGY FROM tablename:查看指定逻辑表的拓扑分布，展示该逻辑表保存在哪些分库中，每个分库下包含哪些分表。
++ SHOW PARTITIONS FROM tablename: 查看分库分表键集合，分库键和分表键之间用逗号分割
++ SHOW BROADCASTS : 查看广播表列表
++ SHOW DATASOURCES:查看底层存储信息，包含数据库名、数据库分组名、连接信息、用户名、底层存储类型、读写权重、连接池信息等
+  + GROUP：数据库分组名,如主备数据库。主要用来解决读写分离、主备切换的问题；
+
++ SHOW NODE:查看物理库的读写次数（历史累计数据）、读写权重（历史累计数据）
++ 慢SQL排查:执行时间超过 1 秒的 SQL 语句是慢 SQL
+  + SHOW [FULL] SLOW [WHERE expr] [limit expr] :逻辑慢 SQL
+    + SHOW SLOW : 查看自 DRDS 启动或者上次执行CLEAR SLOW以来最慢的 100 条逻辑慢 SQL(缓存在 DRDS 系统中，当实例重启或者执行 CLEAR SLOW 时会丢失)
+    + SHOW FULL SLOW : 查看实例启动以来记录的所有逻辑慢 SQL（持久化到 DRDS 的内置数据库中,有上限,滚动删除）
+
+  + SHOW [FULL] PHYSICAL_SLOW [WHERE expr] [limit expr] :物理慢SQL
+    + SHOW PHYSICAL_SLOW
+    + SHOW FULL PHYSICAL_SLOW
+
++ CLEAR SLOW: 清空自 DRDS 启动或者上次执行CLEAR SLOW以来最慢的 100 条逻辑慢 SQL 和 最慢的 100 条物理慢 SQL
++ EXPLAIN SQL: 查看指定 SQL 在 DRDS 层面的执行计划，注意这条 SQL 不会实际执行
++ EXPLAIN DETAIL SQL : 查看更详细的执行计划
++ EXPLAIN EXECUTE SQL: 查看底层存储的执行计划，等同于 MYSQL 的 EXPLAIN 语句
++ TRACE SQL 和 SHOW TRACE : 查看具体 SQL 的执行情况。TRACE [SQL] 和 SHOW TRACE 要结合使用。注意 TRACE SQL 和 EXPLAIN SQL 的区别在于 TRACE SQL 会实际执行该语句
++ CHECK TABLE tablename: 对数据表进行检查。主要用于 DDL 建表失败的情形
+  + 对于拆分表，检查底层物理分表是否有缺失的情况，底层的物理分表的列和索引是否是一致
+  + 对于单库单表，检查表是否存在。
+
++ SHOW TABLE STATUS [LIKE ‘pattern’ | WHERE expr] :获取表的信息，该指令聚合了底层各个物理分表的数据。
++ SHOW [FULL] STATS : 查看整体的实时统计信息(QPS,RT等)，这些信息都是瞬时值。
++ SHOW DB STATUS : 用于查看物理库容量/性能/连接信息，所有返回值为实时信息
++ SHOW PROCESSLIST : 查看 DRDS 中的连接与正在执行的 SQL 等信息
++ SHOW PHYSICAL_PROCESSLIST : 看底层所有 MySQL/RDS 上正在执行的 SQL 信息
++ KILL PROCESS_ID | 'PHYSICAL_PROCESS_ID' | 'ALL' : 用于终止一个正在执行的 SQL
+
+## 自定义hint
++ 读写分离: /!TDDL:MASTER|SLAVE*/
++ 自定义超时: /!TDDL:SOCKET_TIMEOUT=time*/
++ 指定分库执行 SQL: /!TDDL:NODE='node_name'\*/　/!TDDL:NODE IN ('node_name'[,'node_name1','node_name2'])\*/ /!TDDL:table_name.partition_key=value [and table_name1.partition_key=value1]\*/
++ 扫描全部分库分表 : /!TDDL:SCAN*/ /!TDDL:SCAN='table_name'\*/
+
+## DRDS Sequence
+https://help.aliyun.com/document_detail/29675.html?spm=5176.doc51891.6.633.ejMSBA   
+
+> DRDS 全局唯一数字序列（64 位数字，对应 MySQL 中 Signed BIGINT 类型，以下简称为 Sequence）的主要目标是为了生成全局唯一和有序递增的数字序列，常用于主键列、唯一索引列等值的生成。
+
++ DRDS 中的 Sequence 主要有两类用法：
+  + 显式 Sequence，通过 Sequence DDL 语法创建和维护，可以独立使用；通过select seq.nextval;获取序列值，seq 是具体 Sequence 的名字；
+  + 隐式 Sequence，在为主键定义 AUTO_INCREMENT 后，用于自动填充主键，由 DRDS 自动维护。
+
+> 仅拆分表和广播表指定了 AUTO_INCREMENT 后，DRDS 才会创建隐式的 Sequence。非拆分表并不会，非拆分表的 AUTO_INCREMENT 的值由底层 RDS（MySQL）自己生成
+
++ Group Sequence（GROUP，默认使用）
+  + 优点：全局唯一、不会产生单点问题、性能非常好。
+  + 缺点：产生的序列不连续、可能会有跳跃段；不会严格从起始值开始取值；不能循环。
+
++ Group Sequence 是非连续的。START WITH 参数对于 Group Sequence 仅具有指导意义，Group Sequence 不会严格按照该参数作为起始值，但是保证起始值比该参数大。
++ Time-based Sequence 用于表中自增列时，该列必须使用 BIGINT 类型；
++ 转换 Sequence 类型时，必须指定 START WITH 起始值；
++ 对于 DRDS 仅连接一个 RDS 的场景（即所有表都是单库单表），那么执行 Insert 时， DRDS 会直接下推，绕过优化器中分配 Sequence 值的部分。此时 insert into tab values （seq.nextval, ...)这种用法不支持，建议使用 MySQL 自增列代替。
++ INCREMENT BY、MAXVALUE、CYCLE 或 NOCYCLE 对于group/timebased序列无意义，start with对timebased无意义;START WITH 参数对于 Group Sequence 仅具有指导意义，Group Sequence 不会严格按照该参数作为起始值，但是保证起始值比该参数大。
+
+## other
++ 物理分库上的物理分表数 = 向上取整(估算的总数据量 / (RDS 实例数 * 8) / 5,000,000)
++ 注意：虽然前端连接的数量可被认为是无限制的，但从前端连接获取的操作请求是由 DRDS 实例的内部线程通过后端连接实际执行，而内部线程和后端连接的数量有限，因此 DRDS 实例处理请求的整体并发度是有限的。
++ DRDS 实例后端连接池的最大连接数 = 向下取整(RDS 实例最大连接数 / RDS 实例物理分库数 / DRDS 实例节点数)
++ 全表扫描目前支持的聚合函数有 COUNT、MAX、MIN、SUM。另外在全表扫描时同样支持 LIKE、ORDER BY 、LIMIT 以及 GROUP BY 语法。
++ 在 DRDS 上，可以将事务作以下的简单分类：
+  + 单机事务：所有的事务操作都落在同一个 RDS 数据库；
+  + 跨库事务：事务的操作涉及到多个 RDS 数据库。
+  + DRDS 默认支持只单机事务，不支持跨库事务。若需要使用分布式事务，可以申请开通 DRDS 的跨库事务的功能(GTS)
+
++ DRDS 控制台不支持直接执行带有 dbpartition 或 tbpartition 关键字的分布式 DDL。
++ 目前 DRDS 不支持视图、存储过程、跨库外键和级联删除。
++ DRDS 支持对应用透明的读写分离功能
++ DRDS 支持让 SQL 在指定的分库上执行(hint)
++ 由于拆分键的值的修改会涉及到数据在分片之间的移动，属于分布式事务（DRDS 默认不支持分布式事务），所以目前 DRDS 不允许修改拆分键的值。如果业务有此需求，可以尝试重新插入数据，再删除老数据。(update会报错)
++ 经典网络 DRDS 可以切换 VPC 网络
++ DRDS 切换到 VPC 后，不会影响 DRDS 之下的 RDS，因此 RDS 的网络类型不需要做切换
++ 由于 DRDS 依赖于 RDS，所以如果将 RDS 实例切换了网络类型后（无论是从经典网络切换 VPC 还是从 VPC 切换经典网络），DRDS 与 RDS 之间的网络连通性会被破坏。为此，需要到 DRDS 控制台对 DRDS 实例的分库连接进行修复操作。
++ DRDS 实例为共享实例，共享实例无法切换到 VPC 网络。
++ 单个 RDS 实例的默认分库数目是 8 个，不可更改
++ DRDS 的扩容分为两种：
+  + 第一种：扩容时只增加 RDS 实例，不增加分库数目；
+  + 第二种：扩容时不但增加 RDS 实例，还增加分库数目。
+  + 目前在 DRDS 控制台上自助提交的扩容任务默认采用的策略是第一种。第二种扩容策略目前暂未在 DRDS 控制台对用户开放，请耐心等待。
