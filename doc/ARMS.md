@@ -141,6 +141,7 @@
 - 在日志通道不延迟的情况下，统计计算的延迟在10秒之内
 
 - ARMS 的实时计算引擎是 JStorm ，目前不支持直接开发 JStorm 给客户直接使用
+
 - 特殊字符（不可见字符）可以作为分隔符
 - 目前 ARMS 中最多包含一个 ID 类维度和七个维度。
 - Count、Max、Sum、Count Distinct ,Rate
