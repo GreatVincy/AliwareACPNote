@@ -438,4 +438,4 @@ QoS2  | 无离线消息，在线消息保证只推一次  |        暂不支持
 
   - 创建 Consumer、Producer 之后未调用 start() 方法来启动客户端；
   - 创建 Consumer、Producer 之后 start() 过程有异常导致客户端启动失败；
-  - 创建 Consumer、Producer 并成功调用 start() 方法后，显式调用了 shutdown() 方法关闭了客户端。
+  - 创建 Consumer、Producer 并成功调用 start() 方法后，显式调用了 shutdown()方法关闭了客户端
